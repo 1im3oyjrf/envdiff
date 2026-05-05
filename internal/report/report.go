@@ -3,77 +3,65 @@ package report
 import (
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/user/envdiff/internal/diff"
 	"github.com/user/envdiff/internal/mask"
 )
 
-// Options controls report formatting.
+// Options controls report output behavior.
 type Options struct {
 	MaskSecrets bool
-	SourceLabel string
-	TargetLabel string
+	Format      string // "text" or "json"
 }
 
-// DefaultOptions returns sensible defaults for report generation.
+// DefaultOptions returns sensible default report options.
 func DefaultOptions() Options {
 	return Options{
-		MaskSecrets: true,
-		SourceLabel: "source",
-		TargetLabel: "target",
+		MaskSecrets: false,
+		Format:      "text",
 	}
 }
 
-// Write renders a human-readable diff report to w.
+// Write dispatches to the appropriate report format writer.
 func Write(w io.Writer, result diff.Result, opts Options) error {
-	if result.Clean() {
-		_, err := fmt.Fprintln(w, "✓ No differences found.")
-		return err
+	switch opts.Format {
+	case "json":
+		return WriteJSON(w, result, opts)
+	default:
+		return WriteText(w, result, opts)
 	}
-
-	if len(result.MissingInTarget) > 0 {
-		fmt.Fprintf(w, "Missing in %s (%d):\n", opts.TargetLabel, len(result.MissingInTarget))
-		for _, k := range result.MissingInTarget {
-			fmt.Fprintf(w, "  - %s\n", k)
-		}
-	}
-
-	if len(result.MissingInSource) > 0 {
-		fmt.Fprintf(w, "Missing in %s (%d):\n", opts.SourceLabel, len(result.MissingInSource))
-		for _, k := range result.MissingInSource {
-			fmt.Fprintf(w, "  - %s\n", k)
-		}
-	}
-
-	if len(result.Mismatched) > 0 {
-		fmt.Fprintf(w, "Mismatched values (%d):\n", len(result.Mismatched))
-		for _, m := range result.Mismatched {
-			srcVal := mask.ApplyMask(m.Key, m.SourceValue, opts.MaskSecrets)
-			tgtVal := mask.ApplyMask(m.Key, m.TargetValue, opts.MaskSecrets)
-			fmt.Fprintf(w, "  ~ %s: %s=%s | %s=%s\n",
-				m.Key,
-				opts.SourceLabel, srcVal,
-				opts.TargetLabel, tgtVal,
-			)
-		}
-	}
-
-	summary := buildSummary(result)
-	_, err := fmt.Fprintf(w, "Summary: %s\n", summary)
-	return err
 }
 
-func buildSummary(r diff.Result) string {
-	parts := []string{}
-	if n := len(r.MissingInTarget); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d missing in target", n))
+// buildSummary returns a one-line summary string for the diff result.
+func buildSummary(result diff.Result) string {
+	total := len(result.MissingInTarget) + len(result.MissingInSource) + len(result.Mismatched)
+	if total == 0 {
+		return "Summary: environments are in sync."
 	}
-	if n := len(r.MissingInSource); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d missing in source", n))
+	return fmt.Sprintf(
+		"Summary: %d issue(s) found — %d missing in target, %d missing in source, %d mismatched.",
+		total,
+		len(result.MissingInTarget),
+		len(result.MissingInSource),
+		len(result.Mismatched),
+	)
+}
+
+// maskResultValues returns a copy of result with secret values masked if enabled.
+func maskResultValues(result diff.Result, enabled bool) diff.Result {
+	if !enabled {
+		return result
 	}
-	if n := len(r.Mismatched); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d mismatched", n))
+	masked := diff.Result{
+		MissingInTarget: result.MissingInTarget,
+		MissingInSource: result.MissingInSource,
 	}
-	return strings.Join(parts, ", ")
+	for _, m := range result.Mismatched {
+		masked.Mismatched = append(masked.Mismatched, diff.Mismatch{
+			Key:         m.Key,
+			SourceValue: mask.ApplyMask(m.Key, m.SourceValue, true),
+			TargetValue: mask.ApplyMask(m.Key, m.TargetValue, true),
+		})
+	}
+	return masked
 }
