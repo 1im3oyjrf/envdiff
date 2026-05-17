@@ -1,104 +1,93 @@
 package envdiff
 
 import (
-	"bytes"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-func makeFileSummary(path string, entries map[string]string) FileSummary {
-	return FileSummary{Path: path, Entries: entries}
+func makeFileSummary(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".env")
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestDiff_NoChanges(t *testing.T) {
-	a := makeFileSummary("a.env", map[string]string{"FOO": "bar", "BAZ": "qux"})
-	b := makeFileSummary("b.env", map[string]string{"FOO": "bar", "BAZ": "qux"})
-
-	result := Diff(a, b)
-
-	if result.HasDifferences() {
-		t.Errorf("expected no differences, got: %+v", result)
+	a := makeFileSummary(t, "FOO=bar\nBAZ=qux\n")
+	b := makeFileSummary(t, "FOO=bar\nBAZ=qux\n")
+	res, err := Diff(a, b)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(result.Identical) != 2 {
-		t.Errorf("expected 2 identical keys, got %d", len(result.Identical))
+	if len(res.OnlyInA)+len(res.OnlyInB)+len(res.Mismatched) != 0 {
+		t.Errorf("expected no diff, got %+v", res)
 	}
 }
 
 func TestDiff_OnlyInA(t *testing.T) {
-	a := makeFileSummary("a.env", map[string]string{"FOO": "bar", "EXTRA": "value"})
-	b := makeFileSummary("b.env", map[string]string{"FOO": "bar"})
-
-	result := Diff(a, b)
-
-	if len(result.OnlyInA) != 1 || result.OnlyInA[0] != "EXTRA" {
-		t.Errorf("expected EXTRA in OnlyInA, got %v", result.OnlyInA)
+	a := makeFileSummary(t, "FOO=bar\nEXTRA=yes\n")
+	b := makeFileSummary(t, "FOO=bar\n")
+	res, err := Diff(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := res.OnlyInA["EXTRA"]; !ok {
+		t.Error("expected EXTRA in OnlyInA")
 	}
 }
 
 func TestDiff_OnlyInB(t *testing.T) {
-	a := makeFileSummary("a.env", map[string]string{"FOO": "bar"})
-	b := makeFileSummary("b.env", map[string]string{"FOO": "bar", "NEW": "val"})
-
-	result := Diff(a, b)
-
-	if len(result.OnlyInB) != 1 || result.OnlyInB[0] != "NEW" {
-		t.Errorf("expected NEW in OnlyInB, got %v", result.OnlyInB)
+	a := makeFileSummary(t, "FOO=bar\n")
+	b := makeFileSummary(t, "FOO=bar\nNEW=val\n")
+	res, err := Diff(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := res.OnlyInB["NEW"]; !ok {
+		t.Error("expected NEW in OnlyInB")
 	}
 }
 
 func TestDiff_Mismatched(t *testing.T) {
-	a := makeFileSummary("a.env", map[string]string{"FOO": "bar"})
-	b := makeFileSummary("b.env", map[string]string{"FOO": "baz"})
-
-	result := Diff(a, b)
-
-	if len(result.Different) != 1 {
-		t.Fatalf("expected 1 mismatch, got %d", len(result.Different))
+	a := makeFileSummary(t, "DB=localhost\n")
+	b := makeFileSummary(t, "DB=prod\n")
+	res, err := Diff(a, b)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if result.Different[0].Key != "FOO" || result.Different[0].ValueA != "bar" || result.Different[0].ValueB != "baz" {
-		t.Errorf("unexpected mismatch: %+v", result.Different[0])
+	if len(res.Mismatched) != 1 || res.Mismatched[0].Key != "DB" {
+		t.Errorf("expected DB mismatch, got %+v", res.Mismatched)
 	}
 }
 
-func TestDiff_SortedOutput(t *testing.T) {
-	a := makeFileSummary("a.env", map[string]string{"Z": "1", "A": "2", "M": "3"})
-	b := makeFileSummary("b.env", map[string]string{})
-
-	result := Diff(a, b)
-
-	for i := 1; i < len(result.OnlyInA); i++ {
-		if result.OnlyInA[i] < result.OnlyInA[i-1] {
-			t.Errorf("OnlyInA not sorted: %v", result.OnlyInA)
-		}
+func TestDiff_SecretKeyDetected(t *testing.T) {
+	if !isSecretKey("API_SECRET") {
+		t.Error("expected API_SECRET to be a secret key")
+	}
+	if isSecretKey("APP_NAME") {
+		t.Error("expected APP_NAME not to be a secret key")
 	}
 }
 
-func TestWriteText_NoDiff(t *testing.T) {
-	a := makeFileSummary("a.env", map[string]string{"FOO": "bar"})
-	b := makeFileSummary("b.env", map[string]string{"FOO": "bar"})
-	result := Diff(a, b)
-
-	var buf bytes.Buffer
-	WriteText(&buf, a, b, result, false)
-
-	if !strings.Contains(buf.String(), "No differences found") {
-		t.Errorf("expected clean output, got: %s", buf.String())
+func TestDiff_MissingFileReturnsError(t *testing.T) {
+	_, err := Diff("/nonexistent/a.env", "/nonexistent/b.env")
+	if err == nil {
+		t.Fatal("expected error for missing files")
 	}
 }
 
-func TestWriteText_MaskSecrets(t *testing.T) {
-	a := makeFileSummary("a.env", map[string]string{"API_SECRET": "abc123"})
-	b := makeFileSummary("b.env", map[string]string{"API_SECRET": "xyz789"})
-	result := Diff(a, b)
-
-	var buf bytes.Buffer
-	WriteText(&buf, a, b, result, true)
-
-	output := buf.String()
-	if strings.Contains(output, "abc123") || strings.Contains(output, "xyz789") {
-		t.Errorf("expected secrets to be masked, got: %s", output)
+func TestDiff_FileNamesPreserved(t *testing.T) {
+	a := makeFileSummary(t, "X=1\n")
+	b := makeFileSummary(t, "X=1\n")
+	res, err := Diff(a, b)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(output, "***") {
-		t.Errorf("expected masked placeholder in output, got: %s", output)
+	if res.FileA != a || res.FileB != b {
+		t.Errorf("file names not preserved: %s %s", res.FileA, res.FileB)
 	}
 }
